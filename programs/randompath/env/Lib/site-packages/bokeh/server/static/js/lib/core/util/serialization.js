@@ -1,0 +1,230 @@
+import { isTypedArray, isArray, isObject } from "./types";
+import { is_little_endian } from "./compat";
+export const ARRAY_TYPES = {
+    uint8: Uint8Array,
+    int8: Int8Array,
+    uint16: Uint16Array,
+    int16: Int16Array,
+    uint32: Uint32Array,
+    int32: Int32Array,
+    float32: Float32Array,
+    float64: Float64Array,
+};
+export const DTYPES = {
+    Uint8Array: "uint8",
+    Int8Array: "int8",
+    Uint16Array: "uint16",
+    Int16Array: "int16",
+    Uint32Array: "uint32",
+    Int32Array: "int32",
+    Float32Array: "float32",
+    Float64Array: "float64",
+};
+function arrayName(array) {
+    if ("name" in array.constructor)
+        return array.constructor.name;
+    else {
+        switch (true) {
+            case array instanceof Uint8Array: return "Uint8Array";
+            case array instanceof Int8Array: return "Int8Array";
+            case array instanceof Uint16Array: return "Uint16Array";
+            case array instanceof Int16Array: return "Int16Array";
+            case array instanceof Uint32Array: return "Uint32Array";
+            case array instanceof Int32Array: return "Int32Array";
+            case array instanceof Float32Array: return "Float32Array";
+            case array instanceof Float64Array: return "Float64Array";
+            default:
+                throw new Error("unsupported typed array");
+        }
+    }
+}
+export const BYTE_ORDER = is_little_endian ? "little" : "big";
+export function swap16(a) {
+    const x = new Uint8Array(a.buffer, a.byteOffset, a.length * 2);
+    for (let i = 0, end = x.length; i < end; i += 2) {
+        const t = x[i];
+        x[i] = x[i + 1];
+        x[i + 1] = t;
+    }
+}
+export function swap32(a) {
+    const x = new Uint8Array(a.buffer, a.byteOffset, a.length * 4);
+    for (let i = 0, end = x.length; i < end; i += 4) {
+        let t = x[i];
+        x[i] = x[i + 3];
+        x[i + 3] = t;
+        t = x[i + 1];
+        x[i + 1] = x[i + 2];
+        x[i + 2] = t;
+    }
+}
+export function swap64(a) {
+    const x = new Uint8Array(a.buffer, a.byteOffset, a.length * 8);
+    for (let i = 0, end = x.length; i < end; i += 8) {
+        let t = x[i];
+        x[i] = x[i + 7];
+        x[i + 7] = t;
+        t = x[i + 1];
+        x[i + 1] = x[i + 6];
+        x[i + 6] = t;
+        t = x[i + 2];
+        x[i + 2] = x[i + 5];
+        x[i + 5] = t;
+        t = x[i + 3];
+        x[i + 3] = x[i + 4];
+        x[i + 4] = t;
+    }
+}
+export function process_buffer(specification, buffers) {
+    const need_swap = specification.order !== BYTE_ORDER;
+    const { shape } = specification;
+    let bytes = null;
+    for (const buf of buffers) {
+        const header = JSON.parse(buf[0]);
+        if (header.id === specification.__buffer__) {
+            bytes = buf[1];
+            break;
+        }
+    }
+    const arr = new (ARRAY_TYPES[specification.dtype])(bytes);
+    if (need_swap) {
+        if (arr.BYTES_PER_ELEMENT === 2) {
+            swap16(arr);
+        }
+        else if (arr.BYTES_PER_ELEMENT === 4) {
+            swap32(arr);
+        }
+        else if (arr.BYTES_PER_ELEMENT === 8) {
+            swap64(arr);
+        }
+    }
+    return [arr, shape];
+}
+export function process_array(obj, buffers) {
+    if (isObject(obj) && '__ndarray__' in obj)
+        return decode_base64(obj);
+    else if (isObject(obj) && '__buffer__' in obj)
+        return process_buffer(obj, buffers);
+    else if (isArray(obj) || isTypedArray(obj))
+        return [obj, []];
+    else
+        return undefined;
+}
+export function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const chars = Array.from(bytes).map((b) => String.fromCharCode(b));
+    return btoa(chars.join(""));
+}
+export function base64ToArrayBuffer(base64) {
+    const binary_string = atob(base64);
+    const len = binary_string.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0, end = len; i < end; i++) {
+        bytes[i] = binary_string.charCodeAt(i);
+    }
+    return bytes.buffer;
+}
+export function decode_base64(input) {
+    const bytes = base64ToArrayBuffer(input.__ndarray__);
+    const dtype = input.dtype;
+    const shape = input.shape;
+    let array;
+    if (dtype in ARRAY_TYPES)
+        array = new (ARRAY_TYPES[dtype])(bytes);
+    else
+        throw new Error(`unknown dtype: ${dtype}`);
+    return [array, shape];
+}
+export function encode_base64(array, shape) {
+    const b64 = arrayBufferToBase64(array.buffer);
+    const name = arrayName(array);
+    let dtype;
+    if (name in DTYPES)
+        dtype = DTYPES[name];
+    else
+        throw new Error(`unknown array type: ${name}`);
+    const data = {
+        __ndarray__: b64,
+        shape,
+        dtype,
+    };
+    return data;
+}
+function decode_traverse_data(v, buffers) {
+    // v is just a regular array of scalars
+    if (v.length == 0 || !(isObject(v[0]) || isArray(v[0]))) {
+        return [v, []];
+    }
+    const arrays = [];
+    const shapes = [];
+    for (const obj of v) {
+        const [arr, shape] = isArray(obj) ? decode_traverse_data(obj, buffers)
+            : process_array(obj, buffers);
+        arrays.push(arr);
+        shapes.push(shape);
+    }
+    // If there is a list of empty lists, reduce that to just a list
+    const filtered_shapes = shapes.map((shape) => shape.filter((v) => v.length != 0));
+    return [arrays, filtered_shapes];
+}
+export function decode_column_data(data, buffers = []) {
+    const new_data = {};
+    const new_shapes = {};
+    for (const k in data) {
+        // might be array of scalars, or might be ragged array or arrays
+        const v = data[k];
+        if (isArray(v)) {
+            // v is just a regular array of scalars
+            if (v.length == 0 || !(isObject(v[0]) || isArray(v[0]))) {
+                new_data[k] = v;
+                continue;
+            }
+            // v is a ragged array of arrays
+            const [arrays, shapes] = decode_traverse_data(v, buffers);
+            new_data[k] = arrays;
+            new_shapes[k] = shapes;
+            // must be object or array (single array case)
+        }
+        else {
+            const [arr, shape] = process_array(v, buffers);
+            new_data[k] = arr;
+            new_shapes[k] = shape;
+        }
+    }
+    return [new_data, new_shapes];
+}
+function encode_traverse_data(v, shapes) {
+    const new_array = [];
+    for (let i = 0, end = v.length; i < end; i++) {
+        const item = v[i];
+        if (isTypedArray(item)) {
+            const shape = shapes[i] ? shapes[i] : undefined;
+            new_array.push(encode_base64(item, shape));
+        }
+        else if (isArray(item)) {
+            new_array.push(encode_traverse_data(item, shapes ? shapes[i] : []));
+        }
+        else
+            new_array.push(item);
+    }
+    return new_array;
+}
+export function encode_column_data(data, shapes) {
+    const new_data = {};
+    for (const k in data) {
+        const v = data[k];
+        const shapes_k = shapes != null ? shapes[k] : undefined;
+        let new_v;
+        if (isTypedArray(v)) {
+            new_v = encode_base64(v, shapes_k);
+        }
+        else if (isArray(v)) {
+            new_v = encode_traverse_data(v, shapes_k || []);
+        }
+        else
+            new_v = v;
+        new_data[k] = new_v;
+    }
+    return new_data;
+}
+//# sourceMappingURL=serialization.js.map
