@@ -1,4 +1,8 @@
 En este repositorio se encuentran los apuntes del curso de **Prorgamación Dinámica y Estocástica con Python**
+Se compone de 3 Carpetas:
+- **docs**: Donde se encuentran los apuentes de las clases en .md
+- **img**: Donde se encuentran las imagenes a las cuales se hace referencia desde los archivos en la carpeta **docs**
+- **programs**: Donde se encuentran los programas desarrollados en las clases del curso
 - Editado desde **Visual Studio Code**, donde utilizo las siguientes extensiones para **Latex** y **Markdown**
   - *LaTeX Workshop*
   - *Markdown All in One*
